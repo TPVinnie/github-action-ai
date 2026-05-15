@@ -68,13 +68,21 @@ jobs:
       - name: Upload to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_SPACE_NAME: ${{ secrets.HF_SPACE_NAME }}
         run: |
           pip install huggingface_hub -q
-          huggingface-cli upload-folder \
-            --repo-id ${{ secrets.HF_USERNAME }}/${{ secrets.HF_SPACE_NAME }} \
-            --repo-type space \
-            --token $HF_TOKEN \
-            hf-space/
+          python -c "
+          from huggingface_hub import HfApi
+          api = HfApi()
+          api.upload_folder(
+              folder_path='hf-space/',
+              repo_id='$HF_USERNAME/$HF_SPACE_NAME',
+              repo_type='space',
+              token='$HF_TOKEN'
+          )
+          print('Deployed successfully to HF Space')
+          "
 
   # ─────────────────────────────────────────────
   # JOB 4: Confirm the deployment is live
