@@ -12,15 +12,14 @@
 6. [app/requirements.txt — Python Dependencies](#6-apprequirementstxt--python-dependencies)
 7. [app/main.py — The API Server](#7-appmainpy--the-api-server)
 8. [hf-space/Dockerfile — The Deployment Pointer](#8-hf-spacedockerfile--the-deployment-pointer)
-9. [tests/test_app.py — Reference File](#9-teststest_apppy--reference-file)
-10. [.github/workflows/deploy.yml — The CI/CD Pipeline](#10-githubworkflowsdeployyml--the-cicd-pipeline)
-11. [Hugging Face Spaces — Where the Model Runs](#11-hugging-face-spaces--where-the-model-runs)
-12. [Docker Hub — Where the Image Lives](#12-docker-hub--where-the-image-lives)
-13. [GPU or CPU? What Hardware Is Used?](#13-gpu-or-cpu-what-hardware-is-used)
-14. [Model Versioning — v1 vs v2](#14-model-versioning--v1-vs-v2)
-15. [GitHub Secrets — How Credentials Are Managed](#15-github-secrets--how-credentials-are-managed)
-16. [End-to-End Flow: What Happens When You Push Code](#16-end-to-end-flow-what-happens-when-you-push-code)
-17. [Key Decisions and Why](#17-key-decisions-and-why)
+9. [.github/workflows/deploy.yml — The CI/CD Pipeline](#9-githubworkflowsdeployyml--the-cicd-pipeline)
+10. [Hugging Face Spaces — Where the Model Runs](#10-hugging-face-spaces--where-the-model-runs)
+11. [Docker Hub — Where the Image Lives](#11-docker-hub--where-the-image-lives)
+12. [GPU or CPU? What Hardware Is Used?](#12-gpu-or-cpu-what-hardware-is-used)
+13. [Model Versioning — v1 vs v2](#13-model-versioning--v1-vs-v2)
+14. [GitHub Secrets — How Credentials Are Managed](#14-github-secrets--how-credentials-are-managed)
+15. [End-to-End Flow: What Happens When You Push Code](#15-end-to-end-flow-what-happens-when-you-push-code)
+16. [Key Decisions and Why](#16-key-decisions-and-why)
 
 ---
 
@@ -91,13 +90,8 @@ github-action-model/
 ├── hf-space/
 │   └── Dockerfile            ← 2-line file: points to Docker Hub image tag
 │
-├── tests/
-│   └── test_app.py           ← Reference file (not used by pipeline)
-│
-├── docs/
-│   └── PROJECT_EXPLAINED.md  ← This file
-│
-└── pytest.ini                ← Test configuration
+└── docs/
+    └── PROJECT_EXPLAINED.md  ← This file
 ```
 
 **Critical distinction:**
@@ -106,7 +100,6 @@ github-action-model/
 |---|---|---|
 | `app/` | Build the Docker image | Developer, manually, once |
 | `hf-space/` | Tell HF Spaces which image to run | Pipeline, on every push |
-| `tests/` | Reference — not part of the active pipeline | For learning/reference |
 
 ---
 
@@ -296,58 +289,7 @@ Change back to `v1` and push. The pipeline deploys v1 again in minutes.
 
 ---
 
-## 9. tests/test_app.py — Reference File
-
-```python
-import sys
-from unittest.mock import MagicMock
-from fastapi.testclient import TestClient
-
-# torch and transformers are 3GB — replace with fakes so CI runs in seconds
-mock_transformers = MagicMock()
-mock_transformers.pipeline.return_value = MagicMock(
-    return_value=[{"label": "POSITIVE", "score": 0.9998}]
-)
-sys.modules["transformers"] = mock_transformers
-sys.modules["torch"] = MagicMock()
-
-from app.main import app
-
-client = TestClient(app)
-
-# Gate 1: is the service reachable?
-def test_health_endpoint():
-    response = client.get("/health")
-    assert response.status_code == 200
-
-# Gate 2: does predict return the expected fields?
-def test_predict_returns_sentiment():
-    response = client.post("/predict", json={"text": "I love this course!"})
-    assert response.status_code == 200
-    assert "label" in response.json()
-    assert "score" in response.json()
-
-# Gate 3: is bad input rejected before reaching the model?
-def test_empty_text_is_rejected():
-    response = client.post("/predict", json={"text": "   "})
-    assert response.status_code == 400
-```
-
-**Important: this file is NOT used by the active pipeline.**
-
-The pipeline replaced the mocked test approach with a real model smoke test (Job 1 — smoke-test). This file is kept in the repo as a **reference** to show the alternative approach and for local development use.
-
-**What it demonstrates conceptually:**
-- `sys.modules["transformers"] = MagicMock()` — replaces the real 3GB library with a fake object so tests run in seconds without installing torch
-- Tests check API routing, response shape, and input validation — not the model itself
-- `TestClient` runs the FastAPI app in-process without starting a real server
-
-**When would you use this approach instead of the smoke test?**
-When your Docker image is very large (like this one at 8.67GB) and pulling it in CI takes too long. The trade-off is you test your API code but not the actual model. The smoke test tests the real model but takes longer.
-
----
-
-## 10. .github/workflows/deploy.yml — The CI/CD Pipeline
+## 9. .github/workflows/deploy.yml — The CI/CD Pipeline
 
 This file defines the entire automated pipeline. GitHub reads it and runs it on every push to `main`.
 
