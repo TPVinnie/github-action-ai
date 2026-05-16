@@ -12,7 +12,7 @@
 6. [app/requirements.txt — Python Dependencies](#6-apprequirementstxt--python-dependencies)
 7. [app/main.py — The API Server](#7-appmainpy--the-api-server)
 8. [hf-space/Dockerfile — The Deployment Pointer](#8-hf-spacedockerfile--the-deployment-pointer)
-9. [tests/test_app.py — Automated Tests](#9-teststest_apppy--automated-tests)
+9. [tests/test_app.py — Reference File](#9-teststest_apppy--reference-file)
 10. [.github/workflows/deploy.yml — The CI/CD Pipeline](#10-githubworkflowsdeployyml--the-cicd-pipeline)
 11. [Hugging Face Spaces — Where the Model Runs](#11-hugging-face-spaces--where-the-model-runs)
 12. [Docker Hub — Where the Image Lives](#12-docker-hub--where-the-image-lives)
@@ -20,6 +20,7 @@
 14. [Model Versioning — v1 vs v2](#14-model-versioning--v1-vs-v2)
 15. [GitHub Secrets — How Credentials Are Managed](#15-github-secrets--how-credentials-are-managed)
 16. [End-to-End Flow: What Happens When You Push Code](#16-end-to-end-flow-what-happens-when-you-push-code)
+17. [Key Decisions and Why](#17-key-decisions-and-why)
 
 ---
 
@@ -29,14 +30,13 @@ This project demonstrates a complete **MLOps CI/CD pipeline** using GitHub Actio
 
 **In simple terms:**
 - A sentiment analysis model (DistilBERT) is packaged inside a Docker image
-- That Docker image is stored on Docker Hub
-- Every time a developer pushes code to GitHub, a pipeline automatically:
-  - Runs tests to validate the code
-  - Verifies the Docker image exists
+- That Docker image is stored on Docker Hub — built once manually, never by the pipeline
+- Every time a developer pushes code to GitHub, the pipeline automatically:
+  - Pulls the real Docker image and runs a live prediction to confirm the model works
   - Deploys the model to Hugging Face Spaces
-  - Confirms the deployment is live
+  - Confirms the live endpoint is healthy
 
-**The key MLOps principle demonstrated:** No one manually logs into a server, copies files, or restarts services. Everything is automated through the pipeline.
+**The key MLOps principle demonstrated:** No one manually logs into a server, copies files, or restarts services. One `git push` triggers everything automatically.
 
 ---
 
@@ -50,21 +50,21 @@ Developer pushes code
         │
         ▼
   GitHub Actions (CI/CD)
-   ┌────┴────┐
-   │         │
-   ▼         ▼
-validate  check-image ──── Docker Hub
-   │         │           (image stored here)
-   └────┬────┘
-        │ both pass
+        │
+        ▼
+  smoke-test ──────────── Docker Hub
+  (pull image, run it,    (image pulled from here)
+   test real prediction)
+        │ passes
         ▼
       deploy ──────────── Hugging Face Spaces
-        │                 (model runs here)
+        │                 (model deployed here)
         ▼
-   health-check ──────── Live API endpoint
+   health-check ──────── Live API endpoint confirmed
 ```
 
 **Three external services are involved:**
+
 | Service | Role |
 |---|---|
 | **GitHub** | Stores code and runs the pipeline |
@@ -80,19 +80,19 @@ github-action-model/
 │
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml        ← The CI/CD pipeline definition
+│       └── deploy.yml        ← The CI/CD pipeline (3 jobs)
 │
-├── app/                      ← Application code (used to build Docker image)
-│   ├── main.py               ← FastAPI server with DistilBERT model
-│   ├── requirements.txt      ← Python package dependencies
-│   ├── Dockerfile            ← Instructions to build the Docker image
-│   └── __init__.py           ← Makes app/ importable as a Python package
+├── app/                      ← Used ONCE manually to build the Docker image
+│   ├── main.py               ← FastAPI server with DistilBERT
+│   ├── requirements.txt      ← Python dependencies
+│   ├── Dockerfile            ← Instructions to build the image
+│   └── __init__.py           ← Makes app/ a Python package
 │
 ├── hf-space/
-│   └── Dockerfile            ← One-line file pointing to Docker Hub image
+│   └── Dockerfile            ← 2-line file: points to Docker Hub image tag
 │
 ├── tests/
-│   └── test_app.py           ← Automated tests run by the pipeline
+│   └── test_app.py           ← Reference file (not used by pipeline)
 │
 ├── docs/
 │   └── PROJECT_EXPLAINED.md  ← This file
@@ -100,9 +100,13 @@ github-action-model/
 └── pytest.ini                ← Test configuration
 ```
 
-**Important distinction:**
-- `app/` contains everything needed to **build** the Docker image. This is done **once manually** on a developer's machine. The CI/CD pipeline never builds the image.
-- `hf-space/` contains what the pipeline **actually deploys** — a single Dockerfile that tells Hugging Face which image to pull from Docker Hub.
+**Critical distinction:**
+
+| Folder | Purpose | Who uses it |
+|---|---|---|
+| `app/` | Build the Docker image | Developer, manually, once |
+| `hf-space/` | Tell HF Spaces which image to run | Pipeline, on every push |
+| `tests/` | Reference — not part of the active pipeline | For learning/reference |
 
 ---
 
@@ -118,15 +122,15 @@ Sentiment Analysis — given a sentence of text, it predicts whether the sentime
 
 **Example:**
 ```
-Input:  "I love this course!"
-Output: {"label": "POSITIVE", "score": 0.9999}
+Input:  "The weather today is absolutely wonderful!"
+Output: {"label": "POSITIVE", "score": 0.9998, "model_version": "v2"}
 ```
 
 **Where does the model come from?**
-The model is NOT stored inside the Docker image. It lives on Hugging Face Hub at:
+The model is NOT baked inside the Docker image. It lives on Hugging Face Hub at:
 `https://huggingface.co/distilbert-base-uncased-finetuned-sst-2-english`
 
-When the container starts on Hugging Face Spaces, the `transformers` library automatically downloads the model weights (~250MB) from Hugging Face Hub into a local cache inside the container. This happens only on first startup.
+When the container starts, the `transformers` library automatically downloads the model weights (~250MB) from Hugging Face Hub into a local cache. This happens on first startup — which is why the pipeline waits for the container to be ready before testing it.
 
 **Who trained this model?**
 Hugging Face. It was fine-tuned on the SST-2 (Stanford Sentiment Treebank) dataset — a collection of movie reviews labeled as positive or negative.
@@ -154,16 +158,22 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
 
 | Line | What it does |
 |---|---|
-| `FROM python:3.11-slim` | Starts from an official Python 3.11 base image. The `slim` variant is smaller — it excludes documentation and unnecessary packages |
-| `WORKDIR /app` | Sets the working directory inside the container to `/app`. All subsequent commands run from here |
+| `FROM python:3.11-slim` | Starts from an official Python 3.11 base image. `slim` excludes documentation and unnecessary packages to keep the image smaller |
+| `WORKDIR /app` | Sets the working directory inside the container. All subsequent commands run from here |
 | `COPY requirements.txt .` | Copies `requirements.txt` from your machine into the container |
-| `RUN pip install --no-cache-dir -r requirements.txt` | Installs all Python packages. `--no-cache-dir` keeps the image smaller by not caching downloaded packages |
+| `RUN pip install --no-cache-dir -r requirements.txt` | Installs all Python packages. `--no-cache-dir` avoids storing download cache inside the image |
 | `COPY main.py .` | Copies the FastAPI application code into the container |
-| `EXPOSE 7860` | Documents that the container listens on port 7860. Hugging Face Spaces requires this specific port |
-| `CMD [...]` | The command that runs when the container starts. Starts the uvicorn web server serving the FastAPI app on port 7860 |
+| `EXPOSE 7860` | Tells Docker and Hugging Face Spaces this container listens on port 7860 — HF Spaces requires this exact port |
+| `CMD [...]` | Command that runs when the container starts. Launches the uvicorn web server on port 7860 |
 
-**Why is this done manually and not in the pipeline?**
-Building this image takes several minutes because PyTorch alone is ~779MB. If the pipeline built the image on every push, each deployment would take 10+ minutes. Instead, the image is built once, stored on Docker Hub, and the pipeline just references it — making deployments fast.
+**Why is this built manually and not by the pipeline?**
+This image is ~8.67GB (PyTorch alone is ~779MB, plus CUDA libraries). Building it on every push would make the pipeline take 15+ minutes. Instead it is built once, pushed to Docker Hub permanently, and the pipeline just references it by tag.
+
+**How to build and push manually:**
+```bash
+docker build -t 03sarath/distilbert-sentiment:v1 ./app
+docker push 03sarath/distilbert-sentiment:v1
+```
 
 ---
 
@@ -179,14 +189,14 @@ pydantic==2.7.0
 
 | Package | Purpose |
 |---|---|
-| `fastapi` | The web framework for building the REST API |
-| `uvicorn` | The ASGI web server that runs the FastAPI application |
-| `transformers` | Hugging Face library that provides DistilBERT and the `pipeline()` function |
+| `fastapi` | Web framework for building the REST API |
+| `uvicorn` | ASGI web server that runs the FastAPI application |
+| `transformers` | Hugging Face library providing DistilBERT and the `pipeline()` function |
 | `torch` | PyTorch — the deep learning framework DistilBERT runs on |
-| `pydantic` | Data validation library used by FastAPI to validate request and response shapes |
+| `pydantic` | Data validation used by FastAPI to validate request and response shapes |
 
 **Why are exact versions pinned?**
-Pinning versions (e.g., `torch==2.3.0` instead of just `torch`) ensures the Docker image always installs the exact same packages. Without pinning, a rebuild six months later might install a newer version of torch that breaks the model.
+Pinning (e.g., `torch==2.3.0` not just `torch`) ensures the Docker image always installs identical packages. Without pinning, a rebuild six months later might install a newer torch version that breaks the model.
 
 ---
 
@@ -233,25 +243,19 @@ def predict(request: PredictRequest):
 **Section by section:**
 
 **`MODEL_VERSION = "v2"`**
-A constant that identifies which version of the application is running. This is returned in every API response so anyone calling the API can confirm which version is deployed.
-
-**`app = FastAPI(...)`**
-Creates the FastAPI application instance. FastAPI automatically generates interactive API documentation at `/docs`.
+Identifies which version is running. Returned in every API response — this is how you confirm which version is deployed without looking at the server.
 
 **`classifier = pipeline(...)`**
-This line runs when the container starts. It downloads the DistilBERT model from Hugging Face Hub and loads it into memory. The `pipeline()` function is a high-level abstraction from the `transformers` library — it handles tokenization (converting text to numbers), model inference, and converting the output back to human-readable labels.
+Runs at container startup. Downloads DistilBERT from Hugging Face Hub and loads it into memory. This is why the container takes 1–2 minutes to be ready after starting — it is downloading ~250MB of model weights.
 
-**`class PredictRequest(BaseModel)`**
-Defines what the API expects as input. FastAPI uses this to automatically validate incoming requests. If someone sends a request without the `text` field, FastAPI returns a 422 error automatically.
-
-**`class PredictResponse(BaseModel)`**
-Defines the exact shape of the API response. FastAPI uses this to validate the output and generate documentation.
+**`class PredictRequest / PredictResponse`**
+Define the exact shape of the API input and output. FastAPI uses these to automatically validate requests and generate documentation at `/docs`.
 
 **`/health` endpoint**
-A lightweight endpoint used by the pipeline to confirm the service is running. Returns the current version so it is easy to verify which version is deployed.
+Used by the pipeline's health-check job to confirm the service is alive. Returns `version` so it is immediately clear which version is deployed.
 
 **`/predict` endpoint**
-The main endpoint. Accepts a JSON body with a `text` field, runs it through DistilBERT, and returns the sentiment label, confidence score, and model version. The empty text check (`if not request.text.strip()`) prevents the model from receiving blank input, which would cause an error.
+The main endpoint. The empty text check (`if not request.text.strip()`) rejects blank input before it reaches the model — this is important because sending empty text to DistilBERT causes an error.
 
 ---
 
@@ -263,84 +267,89 @@ FROM 03sarath/distilbert-sentiment:v1
 EXPOSE 7860
 ```
 
-This is the most important file in the deployment process — and it is intentionally minimal.
+This 2-line file is the most important file for deployment — and it is intentionally this minimal.
 
 **What it does:**
-- `FROM 03sarath/distilbert-sentiment:v1` — tells Hugging Face Spaces to pull this specific image from Docker Hub and run it
-- `EXPOSE 7860` — tells Hugging Face the container listens on port 7860
+- `FROM 03sarath/distilbert-sentiment:v1` — tells Hugging Face Spaces which image to pull from Docker Hub and run
+- `EXPOSE 7860` — tells Hugging Face the container uses port 7860
 
-**Why is this a separate Dockerfile from `app/Dockerfile`?**
-These two Dockerfiles serve completely different purposes:
+**Why is this separate from `app/Dockerfile`?**
 
 | | `app/Dockerfile` | `hf-space/Dockerfile` |
 |---|---|---|
-| **Purpose** | Build the full image | Point to an already-built image |
-| **Size** | Defines a ~8.67GB image | 2 lines |
-| **When used** | Once, manually by developer | Every push, by the pipeline |
-| **Contains** | Python, packages, code | Nothing — just a reference |
+| **Purpose** | Build the full image | Point to the built image |
+| **Result** | ~8.67GB Docker image | 2-line deployment instruction |
+| **When used** | Once, manually | Every push, by the pipeline |
+| **Contains** | Python, packages, code, model loader | Nothing — just a reference |
 
-**How version upgrades work:**
-To upgrade from v1 to v2, a developer changes one word in this file:
+**How version upgrades work — change one word and push:**
 ```dockerfile
+# Change this
+FROM 03sarath/distilbert-sentiment:v1
+# To this
 FROM 03sarath/distilbert-sentiment:v2
 ```
-Commits and pushes. The pipeline detects the change, reads the new tag, verifies it exists on Docker Hub, and deploys it to Hugging Face Spaces. The entire upgrade is automated from that single line change.
+`git commit` + `git push origin main` → pipeline runs → new version deployed automatically.
+
+**How rollback works:**
+Change back to `v1` and push. The pipeline deploys v1 again in minutes.
 
 ---
 
-## 9. tests/test_app.py — Automated Tests
+## 9. tests/test_app.py — Reference File
 
 ```python
 import sys
 from unittest.mock import MagicMock
+from fastapi.testclient import TestClient
 
-_mock_clf = MagicMock(return_value=[{"label": "POSITIVE", "score": 0.9998}])
-_mock_transformers = MagicMock()
-_mock_transformers.pipeline.return_value = _mock_clf
-sys.modules["transformers"] = _mock_transformers
+# torch and transformers are 3GB — replace with fakes so CI runs in seconds
+mock_transformers = MagicMock()
+mock_transformers.pipeline.return_value = MagicMock(
+    return_value=[{"label": "POSITIVE", "score": 0.9998}]
+)
+sys.modules["transformers"] = mock_transformers
 sys.modules["torch"] = MagicMock()
 
-from fastapi.testclient import TestClient
 from app.main import app
 
 client = TestClient(app)
 
-def test_health():
+# Gate 1: is the service reachable?
+def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
 
-def test_predict_returns_label_and_score():
-    response = client.post("/predict", json={"text": "I love this product!"})
+# Gate 2: does predict return the expected fields?
+def test_predict_returns_sentiment():
+    response = client.post("/predict", json={"text": "I love this course!"})
     assert response.status_code == 200
-    body = response.json()
-    assert "label" in body
-    assert "score" in body
+    assert "label" in response.json()
+    assert "score" in response.json()
 
-def test_predict_empty_text_returns_400():
+# Gate 3: is bad input rejected before reaching the model?
+def test_empty_text_is_rejected():
     response = client.post("/predict", json={"text": "   "})
     assert response.status_code == 400
 ```
 
-**Why mock `transformers` and `torch`?**
-Installing PyTorch in the pipeline just to run tests would take 5+ minutes and add complexity. The tests are checking the **API logic** (routing, validation, response shape) — not the model itself. So we replace `transformers` and `torch` with fake (mock) objects using Python's `unittest.mock`. The `sys.modules` trick intercepts the import before Python tries to load the real libraries.
+**Important: this file is NOT used by the active pipeline.**
 
-**The three tests:**
+The pipeline replaced the mocked test approach with a real model smoke test (Job 1 — smoke-test). This file is kept in the repo as a **reference** to show the alternative approach and for local development use.
 
-| Test | What it verifies |
-|---|---|
-| `test_health` | The `/health` endpoint returns HTTP 200 and a `status: ok` field |
-| `test_predict_returns_label_and_score` | The `/predict` endpoint returns a response containing `label` and `score` fields |
-| `test_predict_empty_text_returns_400` | Sending empty text returns HTTP 400 (bad request), not a server crash |
+**What it demonstrates conceptually:**
+- `sys.modules["transformers"] = MagicMock()` — replaces the real 3GB library with a fake object so tests run in seconds without installing torch
+- Tests check API routing, response shape, and input validation — not the model itself
+- `TestClient` runs the FastAPI app in-process without starting a real server
 
-**Why does `test_predict_empty_text_returns_400` matter?**
-In production, users will send unexpected inputs. This test confirms the validation logic works — the API rejects bad input gracefully rather than passing it to the model and crashing.
+**When would you use this approach instead of the smoke test?**
+When your Docker image is very large (like this one at 8.67GB) and pulling it in CI takes too long. The trade-off is you test your API code but not the actual model. The smoke test tests the real model but takes longer.
 
 ---
 
 ## 10. .github/workflows/deploy.yml — The CI/CD Pipeline
 
-This file defines the entire automated pipeline. GitHub reads this file and executes it every time code is pushed to the `main` branch.
+This file defines the entire automated pipeline. GitHub reads it and runs it on every push to `main`.
 
 ### Trigger
 
@@ -351,7 +360,7 @@ on:
       - main
 ```
 
-The pipeline only runs on pushes to `main`. Pushes to other branches (feature branches, etc.) are ignored.
+Only pushes to `main` trigger the pipeline. Always push to `main` — not `master`. Pushing to `master` goes to a different branch that nothing watches.
 
 ### Global Variable
 
@@ -360,72 +369,94 @@ env:
   DOCKER_REPO: 03sarath/distilbert-sentiment
 ```
 
-The Docker Hub repository name, available to all jobs. Defined once to avoid repetition.
+Docker Hub repository name — available to all jobs so it is defined once and not repeated.
 
 ---
 
-### Job 1: validate
+### Job 1: smoke-test
 
 ```yaml
-validate:
-  name: Validate Code
+smoke-test:
+  name: Model Smoke Test
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
-    - run: pip install pytest fastapi httpx pydantic
-    - run: pytest tests/ -v
-```
 
-**What it does:**
-GitHub spins up a fresh Ubuntu virtual machine, downloads the repo code, installs only the lightweight test dependencies (no torch, no transformers — because they are mocked), and runs the 3 tests. If any test fails, the entire pipeline stops and deployment never happens.
-
-**MLOps significance:** This is the quality gate. Bad code cannot reach production.
-
----
-
-### Job 2: check-image
-
-```yaml
-check-image:
-  name: Verify Docker Hub Image
-  runs-on: ubuntu-latest
-  outputs:
-    image_tag: ${{ steps.read-tag.outputs.tag }}
-  steps:
-    - uses: actions/checkout@v4
-    - name: Read image tag from hf-space/Dockerfile
-      id: read-tag
+    - name: Start container
       run: |
-        TAG=$(grep '^FROM' hf-space/Dockerfile | awk -F: '{print $2}')
-        echo "tag=$TAG" >> $GITHUB_OUTPUT
-    - name: Check image exists on Docker Hub
-      run: docker manifest inspect ${{ env.DOCKER_REPO }}:${{ steps.read-tag.outputs.tag }}
+        IMAGE=$(grep '^FROM' hf-space/Dockerfile | awk '{print $2}')
+        docker run -d --name smoke-test -p 7860:7860 $IMAGE
+
+    - name: Wait for model and run smoke test
+      run: |
+        curl --retry 20 --retry-delay 15 --retry-connrefused --retry-all-errors -sf \
+          http://localhost:7860/health
+        curl --fail -X POST http://localhost:7860/predict \
+          -H "Content-Type: application/json" \
+          -d '{"text": "The weather today is absolutely wonderful!"}'
+
+    - name: Stop container
+      if: always()
+      run: docker stop smoke-test && docker rm smoke-test
 ```
 
-**What it does:**
-1. Reads the `hf-space/Dockerfile` and extracts the image tag (e.g., `v1` or `v2`) using `grep` and `awk`
-2. Calls Docker Hub's API via `docker manifest inspect` to confirm that exact image tag exists
-3. If the image does not exist on Docker Hub, the pipeline fails here — protecting against deploying a broken reference
+**What each step does:**
 
-**Why this matters:**
-If a developer changes `hf-space/Dockerfile` to reference `v3` but forgets to build and push the `v3` image to Docker Hub, this job catches it before deployment even starts.
+**Step 1 — Start container:**
+```bash
+IMAGE=$(grep '^FROM' hf-space/Dockerfile | awk '{print $2}')
+```
+Reads `hf-space/Dockerfile`, extracts the image name (e.g., `03sarath/distilbert-sentiment:v1`). `grep '^FROM'` finds the FROM line, `awk '{print $2}'` extracts the second word (the image name).
 
-Jobs 1 and 2 run **in parallel** (neither has a `needs` dependency on the other), saving time.
+```bash
+docker run -d --name smoke-test -p 7860:7860 $IMAGE
+```
+Starts the container in the background (`-d`), names it `smoke-test`, maps port 7860. Docker automatically pulls the image from Docker Hub if not already present.
+
+**Step 2 — Wait and test:**
+```bash
+curl --retry 20 --retry-delay 15 --retry-connrefused --retry-all-errors -sf \
+  http://localhost:7860/health
+```
+Polls the `/health` endpoint until the model is ready. The two retry flags are both needed:
+- `--retry-connrefused` — retries while the port is still closed (container starting)
+- `--retry-all-errors` — retries while the port is open but not responding (model still downloading)
+
+Without `--retry-all-errors`, curl exits with code 56 ("receive error") instead of retrying.
+
+Retries every 15 seconds, up to 20 times (5 minutes maximum wait).
+
+```bash
+curl --fail -X POST http://localhost:7860/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The weather today is absolutely wonderful!"}'
+```
+Sends a real sentence to the real DistilBERT model. `--fail` means any non-200 response fails the step and blocks deployment.
+
+**Step 3 — Stop container:**
+```bash
+if: always()
+```
+This step runs even if previous steps failed — ensures the container is always cleaned up and no orphaned containers are left on the runner.
+
+**Why this is better than mocked tests for MLOps:**
+The smoke test validates the **actual artifact** being deployed — the real Docker image with the real model. If the image is broken, corrupted, or the model fails to load, the smoke test catches it before anything reaches Hugging Face Spaces.
+
+**Time expectation:** 8–12 minutes (mostly pulling the 8.67GB image).
 
 ---
 
-### Job 3: deploy
+### Job 2: deploy
 
 ```yaml
 deploy:
   name: Deploy to Hugging Face Spaces
   runs-on: ubuntu-latest
-  needs: [validate, check-image]
+  needs: smoke-test
   steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
     - name: Upload to Hugging Face Space
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -447,13 +478,14 @@ deploy:
 ```
 
 **What it does:**
-Only runs if both Job 1 and Job 2 passed (`needs: [validate, check-image]`). Installs the `huggingface_hub` Python library and uses its `HfApi.upload_folder()` method to push the `hf-space/` folder to the Hugging Face Space repository. Hugging Face detects the new Dockerfile, pulls the referenced image from Docker Hub, and starts running it.
+Only runs after smoke-test passes (`needs: smoke-test`). Installs the `huggingface_hub` Python library and uses `HfApi.upload_folder()` to push the `hf-space/` folder (containing just the 2-line Dockerfile) to the Hugging Face Space git repository. HF Spaces detects the new commit, pulls the referenced Docker image, and runs it.
 
-**`${{ secrets.HF_TOKEN }}`** — reads the Hugging Face API token from GitHub Secrets (never stored in code).
+**Why `HfApi.upload_folder()` instead of `huggingface-cli`?**
+The `huggingface-cli` command was deprecated. The Python `HfApi` is the underlying library that the CLI used — calling it directly is more stable and future-proof.
 
 ---
 
-### Job 4: health-check
+### Job 3: health-check
 
 ```yaml
 health-check:
@@ -463,6 +495,7 @@ health-check:
   steps:
     - name: Wait for Space to rebuild
       run: sleep 90
+
     - name: Call health endpoint and confirm version
       env:
         HF_USERNAME: ${{ secrets.HF_USERNAME }}
@@ -476,61 +509,61 @@ health-check:
 ```
 
 **What it does:**
-Waits 90 seconds for Hugging Face Spaces to pull the image and start the container, then calls the `/health` endpoint. `--retry 5 --retry-delay 30` means it tries up to 5 times, waiting 30 seconds between each attempt (up to 2.5 additional minutes). If the endpoint never responds, the pipeline fails — alerting the team that the deployment succeeded but the service is not healthy.
+Waits 90 seconds for HF Spaces to pull the image and start the container, then calls the live `/health` endpoint on Hugging Face Spaces. Retries up to 5 times with 30-second gaps (up to 2.5 extra minutes). If the endpoint never responds successfully, the pipeline fails — meaning the deployment went through but the service is not healthy.
 
 **The full job dependency chain:**
 ```
-validate ──┐
-           ├──► deploy ──► health-check
-check-image┘
+smoke-test  →  deploy  →  health-check
 ```
+
+Each job only runs if the previous one passed. If smoke-test fails, nothing deploys.
 
 ---
 
 ## 11. Hugging Face Spaces — Where the Model Runs
 
 **What is Hugging Face Spaces?**
-Hugging Face Spaces is a free hosting platform designed specifically for machine learning applications. It supports running apps built with Gradio, Streamlit, or Docker containers.
+Hugging Face Spaces is a free hosting platform for machine learning applications. It supports Gradio, Streamlit, and Docker containers.
 
-**What type of Space is this project using?**
-This project uses a **Docker Space**. When you create a Docker Space, Hugging Face gives you a git repository. You push a Dockerfile to that repository. Hugging Face builds and runs whatever that Dockerfile defines.
+**What type of Space does this project use?**
+A **Docker Space**. HF gives you a git repository. You push a Dockerfile to it. HF builds and runs whatever that Dockerfile defines.
 
-**How is the Space structured?**
+**How the Space works:**
 ```
-HF Space repository (git)
-└── Dockerfile   ← This is what we push via the pipeline
-                    FROM 03sarath/distilbert-sentiment:v1
-                    EXPOSE 7860
+Pipeline pushes hf-space/Dockerfile
+         ↓
+HF Spaces reads:  FROM 03sarath/distilbert-sentiment:v1
+         ↓
+HF Spaces pulls the image from Docker Hub
+         ↓
+HF Spaces runs the container
+         ↓
+Live at: https://03sarath-distilbert-sentiment.hf.space
 ```
-
-When HF Spaces sees a new commit to this repository, it:
-1. Reads the Dockerfile
-2. Pulls `03sarath/distilbert-sentiment:v1` from Docker Hub
-3. Runs the container
-4. Exposes it at `https://03sarath-distilbert-sentiment.hf.space`
 
 **Is this running as a container?**
-Yes. Hugging Face Spaces runs Docker containers internally. Your entire application (FastAPI server + DistilBERT model) runs inside a container on Hugging Face's infrastructure.
+Yes. The entire application (FastAPI + DistilBERT) runs inside a Docker container on Hugging Face's infrastructure.
 
 **Live URL format:**
 ```
 https://{hf-username}-{space-name}.hf.space
 ```
-For this project: `https://03sarath-distilbert-sentiment.hf.space`
+This project: `https://03sarath-distilbert-sentiment.hf.space`
 
 **Available endpoints:**
+
 | Endpoint | Method | Description |
 |---|---|---|
 | `/health` | GET | Returns service status and version |
 | `/predict` | POST | Accepts text, returns sentiment |
-| `/docs` | GET | Auto-generated API documentation |
+| `/docs` | GET | Auto-generated API documentation (FastAPI) |
 
 ---
 
 ## 12. Docker Hub — Where the Image Lives
 
 **What is Docker Hub?**
-Docker Hub is a public registry for storing and sharing Docker images. It is to Docker images what GitHub is to code.
+A public registry for storing Docker images. It is to Docker images what GitHub is to code.
 
 **Image naming convention:**
 ```
@@ -542,20 +575,24 @@ Docker Hub is a public registry for storing and sharing Docker images. It is to 
 ```
 
 **Tags used in this project:**
-| Tag | Contents | When used |
-|---|---|---|
-| `latest` | Same as v1, initial build | During development |
-| `v1` | Original version, health returns `{"status": "ok"}` | First deployment |
-| `v2` | Updated version, health returns `{"status": "ok", "version": "v2"}` + predict includes `model_version` | Second deployment |
+
+| Tag | Size | Health response | Predict response |
+|---|---|---|---|
+| `latest` | 8.67GB | `{"status": "ok"}` | `{"label": "...", "score": ...}` |
+| `v1` | 8.67GB | `{"status": "ok"}` | `{"label": "...", "score": ...}` |
+| `v2` | 8.67GB | `{"status": "ok", "version": "v2"}` | `{"label": "...", "score": ..., "model_version": "v2"}` |
 
 **How was the image built?**
-Manually, once, on a developer's machine:
+Manually once on a developer's machine using Docker Desktop:
 ```bash
-docker build -t 03sarath/distilbert-sentiment:v1 ./app
+docker build -t 03sarath/distilbert-sentiment:latest ./app
+docker push 03sarath/distilbert-sentiment:latest
+
+docker tag 03sarath/distilbert-sentiment:latest 03sarath/distilbert-sentiment:v1
 docker push 03sarath/distilbert-sentiment:v1
 ```
 
-The pipeline never builds the image. It only verifies the image exists and references it in the deployment.
+The pipeline never builds the image — it only pulls and references it.
 
 ---
 
@@ -563,28 +600,25 @@ The pipeline never builds the image. It only verifies the image exists and refer
 
 **Short answer: CPU only, no GPU.**
 
-**On Hugging Face Spaces (Free tier):**
-- Runs on CPU
+**On Hugging Face Spaces free tier:**
+- CPU only
 - 2 vCPUs, 16GB RAM
 - No GPU
 
 **Does DistilBERT need a GPU?**
-No. DistilBERT is small enough to run on CPU for inference (making predictions). It is slower than GPU inference but perfectly adequate for demonstration and low-to-medium traffic use cases.
+No. DistilBERT is small enough to run on CPU for inference. It is slower than GPU but perfectly adequate for demos and low-to-medium traffic.
 
-**How long does a prediction take on CPU?**
-Approximately 50–200ms per request — fast enough for a REST API.
+**Prediction latency on CPU:** approximately 50–200ms per request.
 
 **If you needed GPU:**
-Hugging Face Spaces offers paid GPU tiers (T4, A10G) that can be configured in Space settings. The code would not need to change — PyTorch automatically uses CUDA if a GPU is available.
+HF Spaces offers paid GPU tiers (T4, A10G) configurable in Space settings. The code would not change — PyTorch automatically uses CUDA when a GPU is available.
 
-**What about the Docker image — does it include CUDA?**
-The image was built with `python:3.11-slim` as the base, which has no CUDA support. The PyTorch version installed (`torch==2.3.0`) includes CUDA libraries within the package itself (they are bundled), but they are only activated when a compatible NVIDIA GPU is present. On CPU-only machines, PyTorch silently falls back to CPU execution.
+**Why is the image 8.67GB if there is no GPU?**
+The `torch==2.3.0` package bundles CUDA libraries inside itself (nvidia-cublas, nvidia-cudnn, etc.). These are included in the pip package regardless of whether a GPU is present. On a CPU-only machine, they are never loaded — PyTorch silently falls back to CPU execution.
 
 ---
 
 ## 14. Model Versioning — v1 vs v2
-
-This project demonstrates how to manage model versions through the CI/CD pipeline without any manual server intervention.
 
 **What changed between v1 and v2:**
 
@@ -595,39 +629,38 @@ This project demonstrates how to manage model versions through the CI/CD pipelin
 | `/predict` response | `{"label": "...", "score": ...}` | `{"label": "...", "score": ..., "model_version": "v2"}` |
 | `PredictResponse` schema | `label`, `score` | `label`, `score`, `model_version` |
 
-**How to deploy v2:**
-Change one line in `hf-space/Dockerfile`:
+**How to deploy v2 — one line change:**
 ```dockerfile
+# hf-space/Dockerfile
 FROM 03sarath/distilbert-sentiment:v2
 ```
-Commit and push. The pipeline handles the rest.
+`git commit` + `git push origin main` → pipeline runs automatically → v2 live.
 
 **How to roll back to v1:**
-Change the line back:
 ```dockerfile
 FROM 03sarath/distilbert-sentiment:v1
 ```
-Commit and push. Pipeline deploys v1 again.
+Push. Pipeline deploys v1 again. No server access needed.
 
-**Why is this powerful?**
-Every version is an immutable Docker image stored permanently on Docker Hub. You can deploy any version at any time just by changing a tag. No rebuilding, no data loss, no downtime beyond the container restart time.
+**Why this is powerful:**
+Every version is an immutable image on Docker Hub. You can deploy any version at any time by changing one word in one file and pushing. No rebuilding, no data loss, no manual steps.
 
 ---
 
 ## 15. GitHub Secrets — How Credentials Are Managed
 
-Three secrets are stored in GitHub (repo → Settings → Secrets → Actions):
+Three secrets stored in GitHub (repo → Settings → Secrets and variables → Actions):
 
 | Secret | Value | Used in |
 |---|---|---|
-| `HF_TOKEN` | Hugging Face write-access token | deploy job — authenticates the upload |
+| `HF_TOKEN` | Hugging Face write-access token | deploy job |
 | `HF_USERNAME` | Hugging Face username | deploy job, health-check job |
-| `HF_SPACE_NAME` | Name of the HF Space | deploy job, health-check job |
+| `HF_SPACE_NAME` | Name of the HF Space (`distilbert-sentiment`) | deploy job, health-check job |
 
-**Why not put these directly in the workflow file?**
-If credentials are in the code, anyone with access to the repository can see them. GitHub Secrets are encrypted and are only injected into the pipeline at runtime — they never appear in logs or code. In the workflow logs, they appear as `***`.
+**Why not put these in the workflow file?**
+GitHub Secrets are encrypted at rest and only injected at pipeline runtime. They never appear in code or logs — shown as `***` in the Actions output. If you put credentials directly in the YAML file, anyone with repo access can see them.
 
-**How they are accessed in the workflow:**
+**How they are used in the workflow:**
 ```yaml
 env:
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -637,7 +670,7 @@ env:
 
 ## 16. End-to-End Flow: What Happens When You Push Code
 
-Here is the complete sequence of events from `git push` to a live model:
+Complete sequence from `git push` to a live updated model:
 
 ```
 1. Developer changes hf-space/Dockerfile (e.g., v1 → v2)
@@ -645,44 +678,62 @@ Here is the complete sequence of events from `git push` to a live model:
 3. GitHub detects push to main branch
 4. GitHub Actions starts the workflow
 
-5. JOB 1 (validate) — runs in parallel with Job 2
+5. JOB 1 (smoke-test)
    - Spins up Ubuntu VM
    - Downloads repo code
-   - Installs pytest, fastapi, httpx, pydantic
-   - Runs 3 tests against mocked app
-   - All pass → Job 1 complete
+   - Reads hf-space/Dockerfile → extracts image name
+   - docker run pulls image from Docker Hub (~8.67GB, takes 5-10 min)
+   - Container starts, DistilBERT downloads from HF Hub (~250MB)
+   - curl polls /health every 15s until model is ready
+   - Sends real prediction → model responds
+   - docker stop cleans up container
+   - Smoke test passed → Job 1 complete
 
-6. JOB 2 (check-image) — runs in parallel with Job 1
+6. JOB 2 (deploy) — starts only after Job 1 passes
    - Spins up Ubuntu VM
    - Downloads repo code
-   - Reads hf-space/Dockerfile → extracts tag "v2"
-   - Calls Docker Hub API → confirms 03sarath/distilbert-sentiment:v2 exists
+   - pip install huggingface_hub
+   - HfApi.upload_folder() pushes hf-space/Dockerfile to HF Space repo
+   - HF Spaces detects the new commit
+   - HF Spaces pulls the Docker image from Docker Hub
+   - HF Spaces starts the container
    - Job 2 complete
 
-7. JOB 3 (deploy) — starts only after Job 1 AND Job 2 pass
-   - Spins up Ubuntu VM
-   - Downloads repo code
-   - Installs huggingface_hub library
-   - Calls HfApi.upload_folder() with HF credentials from secrets
-   - Uploads hf-space/Dockerfile to HF Space git repo
-   - HF Spaces detects the new commit
-   - HF Spaces pulls 03sarath/distilbert-sentiment:v2 from Docker Hub
-   - HF Spaces starts the container
-   - Job 3 complete
-
-8. JOB 4 (health-check) — starts after Job 3
-   - Waits 90 seconds for container to start
-   - Calls GET https://03sarath-distilbert-sentiment.hf.space/health
+7. JOB 3 (health-check) — starts after Job 2
+   - Waits 90 seconds for HF Spaces to rebuild
+   - curl calls GET https://03sarath-distilbert-sentiment.hf.space/health
    - Retries up to 5 times if not ready
    - Gets 200 OK → pipeline succeeds
    - If never responds → pipeline fails, team is alerted
 
-9. Model is live at:
+8. Model is live at:
    https://03sarath-distilbert-sentiment.hf.space/predict
 ```
 
-**Total time from push to live:** approximately 4–5 minutes.
+**Total time from push to live:** approximately 12–15 minutes (dominated by the 8.67GB image pull in smoke-test).
 
 ---
 
-*This documentation covers the complete project as built for the MLOps Specialization Course. The same CI/CD pattern applies to any machine learning model, not just DistilBERT — the pipeline structure remains identical whether you are deploying a computer vision model, a recommender system, or a large language model.*
+## 17. Key Decisions and Why
+
+**Why not build the Docker image in the pipeline?**
+The image is 8.67GB. Building it on every push would take 15+ minutes and waste compute. The image is built once manually when code changes, pushed to Docker Hub, and the pipeline just references it by tag.
+
+**Why use `HfApi.upload_folder()` instead of git commands?**
+The original pipeline used `git clone` + `git commit` + `git push` to update the HF Space. This required 5 steps and was fragile. The Python API does the same thing in 1 step and handles all the git operations internally.
+
+**Why was `huggingface-cli` replaced?**
+The `huggingface-cli` command was deprecated by Hugging Face. Running it produced a fatal error. The `HfApi` Python library is the stable, supported alternative.
+
+**Why `--retry-all-errors` on the health check curl?**
+Without it, curl exits with code 56 (receive error) when the container port is open but the HTTP server is not yet responding. `--retry-connrefused` alone only retries on connection refused (code 7) — it does not retry on receive errors. Both flags are needed to cover the full container startup sequence.
+
+**Why keep `tests/test_app.py` if it is not used by the pipeline?**
+It demonstrates an alternative CI approach (fast mocked tests vs slow real model test) and is useful for local development when you want to verify API logic without running the full container.
+
+**Why push to `main` not `master`?**
+The workflow trigger is `on: push: branches: main`. Pushing to `master` creates a separate branch that the pipeline ignores — a common source of confusion.
+
+---
+
+*This documentation reflects the final state of the project as built for the MLOps Specialization Course. The same pipeline structure applies to any ML model — replace the Docker Hub image and HF Space name to deploy a different model with zero pipeline changes.*
