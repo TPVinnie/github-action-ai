@@ -27,7 +27,7 @@ jobs:
 
       - name: Wait for model and run smoke test
         run: |
-          curl --retry 20 --retry-delay 15 --retry-connrefused -sf \
+          curl --retry 20 --retry-delay 15 --retry-connrefused --retry-all-errors -sf \
             http://localhost:7860/health
           curl --fail -X POST http://localhost:7860/predict \
             -H "Content-Type: application/json" \
