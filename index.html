@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DistilBERT Sentiment Tester</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+      padding: 40px;
+      width: 100%;
+      max-width: 560px;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 32px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #444;
+      margin-bottom: 6px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #aaa;
+      margin-top: -2px;
+      margin-bottom: 10px;
+    }
+
+    input[type="text"],
+    textarea {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+      color: #222;
+      outline: none;
+      transition: border-color 0.2s;
+      font-family: inherit;
+    }
+
+    input[type="text"]:focus,
+    textarea:focus {
+      border-color: #6c63ff;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 100px;
+      margin-bottom: 20px;
+    }
+
+    .url-row {
+      margin-bottom: 24px;
+    }
+
+    button {
+      width: 100%;
+      padding: 12px;
+      background: #6c63ff;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+    }
+
+    button:hover {
+      background: #574fd6;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .result {
+      margin-top: 24px;
+      padding: 18px 20px;
+      border-radius: 8px;
+      display: none;
+    }
+
+    .result.positive {
+      background: #f0faf4;
+      border: 1.5px solid #34c76a;
+    }
+
+    .result.negative {
+      background: #fff4f4;
+      border: 1.5px solid #f05252;
+    }
+
+    .result.error {
+      background: #fff8ec;
+      border: 1.5px solid #f0a005;
+    }
+
+    .result-label {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .positive .result-label { color: #1a8a45; }
+    .negative .result-label { color: #c0392b; }
+    .error .result-label    { color: #b76e00; }
+
+    .result-meta {
+      font-size: 13px;
+      color: #666;
+    }
+
+    .result-meta span {
+      font-weight: 600;
+      color: #333;
+    }
+
+    .spinner {
+      display: none;
+      text-align: center;
+      margin-top: 20px;
+      font-size: 13px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>DistilBERT Sentiment Tester</h1>
+    <p class="subtitle">Test your deployed Hugging Face Space model</p>
+
+    <div class="url-row">
+      <label for="apiUrl">Hugging Face Space URL</label>
+      <p class="hint">
+        Format: &nbsp;<code>https://YOUR_USERNAME-YOUR_SPACE_NAME.hf.space</code>
+        &nbsp;— do <strong>not</strong> include <code>/predict</code> here
+      </p>
+      <input
+        type="text"
+        id="apiUrl"
+        placeholder="https://03sarath-distilbert-sentiment.hf.space"
+        value=""
+      />
+    </div>
+
+    <label for="inputText">Text to Analyse</label>
+    <textarea
+      id="inputText"
+      placeholder="Type a sentence here, e.g. The product quality exceeded my expectations."
+    ></textarea>
+
+    <button id="submitBtn" onclick="predict()">Analyse Sentiment</button>
+
+    <div class="spinner" id="spinner">Sending request...</div>
+
+    <div class="result" id="result">
+      <div class="result-label" id="resultLabel"></div>
+      <div class="result-meta" id="resultMeta"></div>
+    </div>
+  </div>
+
+  <script>
+    async function predict() {
+      const urlInput  = document.getElementById("apiUrl").value.trim().replace(/\/$/, "");
+      const textInput = document.getElementById("inputText").value.trim();
+      const btn       = document.getElementById("submitBtn");
+      const spinner   = document.getElementById("spinner");
+      const resultBox = document.getElementById("result");
+
+      // Clear previous result
+      resultBox.style.display = "none";
+      resultBox.className = "result";
+
+      if (!urlInput) {
+        showError("Please enter your Hugging Face Space URL.");
+        return;
+      }
+      if (!textInput) {
+        showError("Please enter some text to analyse.");
+        return;
+      }
+
+      btn.disabled        = true;
+      spinner.style.display = "block";
+
+      try {
+        const response = await fetch(`${urlInput}/predict`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: textInput }),
+        });
+
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        const isPositive = data.label === "POSITIVE";
+        const emoji      = isPositive ? "😊" : "😞";
+        const confidence = (data.score * 100).toFixed(1);
+
+        resultBox.classList.add(isPositive ? "positive" : "negative");
+        document.getElementById("resultLabel").textContent =
+          `${emoji}  ${data.label}`;
+        document.getElementById("resultMeta").innerHTML =
+          `Confidence: <span>${confidence}%</span>` +
+          (data.model_version ? `&nbsp;&nbsp;|&nbsp;&nbsp;Model version: <span>${data.model_version}</span>` : "");
+
+      } catch (err) {
+        showError(err.message || "Request failed. Check the URL and try again.");
+      } finally {
+        btn.disabled        = false;
+        spinner.style.display = "none";
+        resultBox.style.display = "block";
+      }
+    }
+
+    function showError(message) {
+      const resultBox = document.getElementById("result");
+      resultBox.classList.add("error");
+      document.getElementById("resultLabel").textContent = "⚠  Error";
+      document.getElementById("resultMeta").textContent  = message;
+      resultBox.style.display = "block";
+    }
+
+    // Allow Enter key in textarea via Ctrl+Enter
+    document.getElementById("inputText").addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && e.ctrlKey) predict();
+    });
+  </script>
+</body>
+</html>
